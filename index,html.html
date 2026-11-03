@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice AI Calendar</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f9f9f9; color: #333; }
+        h1 { font-size: 1.5rem; text-align: center; }
+        .api-config { background: #fff3cd; padding: 10px 15px; border: 1px solid #ffeeba; border-radius: 8px; margin-bottom: 20px; font-size: 0.9rem; display: flex; gap: 10px; align-items: center; }
+        .api-config input { flex: 1; padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
+        .calendar-nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .days-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin-bottom: 20px; }
+        .day-cell { background: #fff; padding: 10px; min-height: 80px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; position: relative; }
+        .day-cell:hover { background: #f0f0f0; }
+        .day-cell.active { border: 2px solid #007bff; background: #eef9ff; }
+        .day-number { font-weight: bold; font-size: 0.9rem; }
+        .selected-date-section { background: #fff; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+        textarea { width: 100%; height: 100px; padding: 10px; box-sizing: border-box; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+        button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .btn-voice { background: #dc3545; }
+        .btn-voice:hover { background: #a71d2a; }
+        .btn-voice.listening { background: #ffc107; color: #333; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+        .ai-output { margin-top: 15px; background: #eef9ff; padding: 10px; border-left: 4px solid #007bff; border-radius: 4px; white-space: pre-wrap; }
+        .voice-log { font-size: 0.85rem; color: #666; margin-top: 5px; font-style: italic; }
+    </style>
+</head>
+<body>
+
+    <h1>🎙️ Voice AI Calendar</h1>
+
+    <!-- 画面上でAPIキーを設定できるようにしました -->
+    <div class="api-config" id="api-config-bar">
+        <span>🔑 APIキー:</span>
+        <input type="password" id="api-key-input" placeholder="AI StudioのAPIキーを入力して保存">
+        <button onclick="saveApiKey()">キーを保存</button>
+    </div>
+    
+    <div class="calendar-nav">
+        <button onclick="changeMonth(-1)">前の月</button>
+        <h2 id="month-year-display" style="margin:0;"></h2>
+        <button onclick="changeMonth(1)">次の月</button>
+    </div>
+
+    <div class="days-grid" id="calendar-grid"></div>
+
+    <div class="selected-date-section">
+        <h3 id="current-selected-date">日付を選んでください</h3>
+        
+        <div class="btn-group">
+            <button id="voice-btn" class="btn-voice" onclick="toggleVoiceInput()">🔴 音声で指示・入力を開始</button>
+        </div>
+        <div id="voice-log" class="voice-log">「〇月〇日に〜」「今日の予定を消して」「〇日に移動して」などと話しかけてください</div>
+
+        <textarea id="memo-input" placeholder="ここにメモや予定が入力されます..."></textarea>
+        
+        <div class="btn-group">
+            <button onclick="saveMemo()">保存</button>
+            <button onclick="deleteMemo()" style="background: #6c757d;">削除</button>
+            <button onclick="askAI()" style="background: #28a745;">AI壁打ち</button>
+        </div>
+        
+        <div id="ai-result" class="ai-output" style="display:none;"></div>
+    </div>
+
+    <script>
+        let API_KEY = localStorage.getItem('ai_calendar_api_key') || "";
+        
+        // 起動時にすでにキーがあれば入力欄にセットし、警告バーを隠す
+        if (API_KEY) {
+            document.getElementById('api-key-input').value = API_KEY;
+            document.getElementById('api-config-bar').style.background = "#e2f0d9";
+            document.getElementById('api-config-bar').innerHTML = '<span>✅ APIキー設定済み</span><button onclick="resetApiKey()" style="background:#6c757d; padding:2px 8px; font-size:0.8rem;">変更する</button>';
+        }
+
+        function saveApiKey() {
+            const key = document.getElementById('api-key-input').value.trim();
+            if (!key) return alert('APIキーを入力してください');
+            localStorage.setItem('ai_calendar_api_key', key);
+            API_KEY = key;
+            alert('APIキーを保存しました！');
+            location.reload();
+        }
+
+        function resetApiKey() {
+            localStorage.removeItem('ai_calendar_api_key');
+            location.reload();
+        }
+
+        let currentDate = new Date();
+        let selectedDateStr = "";
+        let memos = JSON.parse(localStorage.getItem('ai_calendar_memos') || '{}');
+        let recognition = null;
+        let isListening = false;
+
+        const todayStr = new Date().toISOString().split('T')[0];
+
+        function renderCalendar() {
+            const year = currentDate.getFullYear();
+            const month = currentDate.getMonth();
+            document.getElementById('month-year-display').textContent = `${year}年 ${month + 1}月`;
+
+            const grid = document.getElementById('calendar-grid');
+            grid.innerHTML = '';
+
+            const firstDayIndex = new Date(year, month, 1).getDay();
+            const totalDays = new Date(year, month + 1, 0).getDate();
+
+            const weekdays = ['日', '月', '火', '水', '木', '金', '土'];
+            weekdays.forEach(w => {
+                const div = document.createElement('div');
+                div.style.textAlign = 'center';
+                div.style.fontWeight = 'bold';
+                div.textContent = w;
+                grid.appendChild(div);
+            });
+
+            for (let i = 0; i < firstDayIndex; i++) {
+                grid.appendChild(document.createElement('div'));
+            }
+
+            for (let day = 1; day <= totalDays; day++) {
+                const cell = document.createElement('div');
+                cell.className = 'day-cell';
+                const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                
+                if (dateStr === selectedDateStr) {
+                    cell.classList.add('active');
+                }
+
+                cell.innerHTML = `<div class="day-number">${day}</div>`;
+                if (memos[dateStr]) {
+                    cell.innerHTML += `<div style="font-size:0.75rem; color:#666; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">📝 ${memos[dateStr]}</div>`;
+                }
+
+                cell.onclick = () => selectDate(dateStr);
+                grid.appendChild(cell);
+            }
+        }
+
+        function changeMonth(direction) {
+            currentDate.setMonth(currentDate.getMonth() + direction);
+            renderCalendar();
+        }
+
+        function selectDate(dateStr) {
+            selectedDateStr = dateStr;
+            document.getElementById('current-selected-date').textContent = `${dateStr} のメモ`;
+            document.getElementById('memo-input').value = memos[dateStr] || '';
+            document.getElementById('ai-result').style.display = 'none';
+            renderCalendar();
+        }
+
+        function saveMemo() {
+            if (!selectedDateStr) return alert('日付を選択してください');
+            const text = document.getElementById('memo-input').value;
+            if (text.trim() === "") {
+                deleteMemo();
+                return;
+            }
+            memos[selectedDateStr] = text;
+            localStorage.setItem('ai_calendar_memos', JSON.stringify(memos));
+            renderCalendar();
+            alert('保存しました！');
+        }
+
+        function deleteMemo() {
+            if (!selectedDateStr) return alert('日付を選択してください');
+            if (confirm(`${selectedDateStr} の予定を削除しますか？`)) {
+                delete memos[selectedDateStr];
+                localStorage.setItem('ai_calendar_memos', JSON.stringify(memos));
+                document.getElementById('memo-input').value = '';
+                renderCalendar();
+                alert('削除しました。');
+            }
+        }
+
+        function toggleVoiceInput() {
+            if (!API_KEY) {
+                alert('先に上部の入力欄にAPIキーを設定してください！');
+                return;
+            }
+
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                alert('お使いのブラウザは音声認識に対応していません（Google Chromeなどをご利用ください）。');
+                return;
+            }
+
+            if (isListening) {
+                recognition.stop();
+                return;
+            }
+
+            recognition = new SpeechRecognition();
+            recognition.lang = 'ja-JP';
+            recognition.interimResults = false;
+
+            recognition.onstart = () => {
+                isListening = true;
+                const btn = document.getElementById('voice-btn');
+                btn.textContent = "🎙️ 聞き取り中...（もう一度押して停止）";
+                btn.classList.add('listening');
+                document.getElementById('voice-log').textContent = "音声認識中...";
+            };
+
+            recognition.onresult = async (event) => {
+                const transcript = event.results[0][0].transcript;
+                document.getElementById('voice-log').textContent = `「${transcript}」`;
+                await interpretVoiceCommand(transcript);
+            };
+
+            recognition.onerror = (event) => {
+                document.getElementById('voice-log').textContent = 'エラー: ' + event.error;
+                stopVoiceUI();
+            };
+
+            recognition.onend = () => {
+                stopVoiceUI();
+            };
+
+            recognition.start();
+        }
+
+        function stopVoiceUI() {
+            isListening = false;
+            const btn = document.getElementById('voice-btn');
+            btn.textContent = "🔴 音声で指示・入力を開始";
+            btn.classList.remove('listening');
+        }
+
+        async function interpretVoiceCommand(spokenText) {
+            const today = new Date().toISOString().split('T')[0];
+            const currentYearMonth = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
+
+            const prompt = `あなたはカレンダーアプリの音声アシスタントです。ユーザーの音声発話から意図を正確に読み取り、以下のJSON形式のみで返答してください。余計な文章は一切含めないでください。
+
+基準日: ${today}
+現在のカレンダー表示月: ${currentYearMonth}
+選択中の日付: ${selectedDateStr || today}
+
+【操作の種類 (action)】
+- "add" : メモや予定を追加・書き込む
+- "show" : その日の予定・画面を表示する
+- "delete" : 予定を削除する
+- "move" : 別の日付に移動する
+
+【出力JSONフォーマット】
+{
+  "action": "add" または "show" または "delete" または "move",
+  "targetDate": "YYYY-MM-DD"形式,
+  "content": "追加する内容（addの場合のみ）",
+  "destDate": "YYYY-MM-DD"形式（moveの場合の移動先の日付。それ以外はnull）
+}
+
+ユーザーの発話: "${spokenText}"`;
+
+            try {
+                document.getElementById('voice-log').textContent = `AIが音声コマンドを解析中...`;
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: { responseMimeType: "application/json" }
+                    })
+                });
+                const data = await response.json();
+                const resultJson = JSON.parse(data.candidates[0].content.parts[0].text);
+
+                executeCommand(resultJson);
+
+            } catch (e) {
+                document.getElementById('voice-log').textContent = 'コマンド解析エラー（APIキーを確認してください）: ' + e.message;
+            }
+        }
+
+        function executeCommand(cmd) {
+            if (cmd.targetDate) {
+                selectDate(cmd.targetDate);
+                const [y, m] = cmd.targetDate.split('-');
+                currentDate = new Date(y, m - 1, 1);
+                renderCalendar();
+            }
+
+            if (cmd.action === "add") {
+                if (cmd.content) {
+                    const existing = memos[cmd.targetDate] ? memos[cmd.targetDate] + "\n" : "";
+                    memos[cmd.targetDate] = existing + cmd.content;
+                    localStorage.setItem('ai_calendar_memos', JSON.stringify(memos));
+                    selectDate(cmd.targetDate);
+                    document.getElementById('voice-log').textContent = `✅ ${cmd.targetDate} に「${cmd.content}」を追加しました！`;
+                }
+            } else if (cmd.action === "show") {
+                document.getElementById('voice-log').textContent = `👀 ${cmd.targetDate} の予定を表示しました。`;
+            } else if (cmd.action === "delete") {
+                if (memos[cmd.targetDate]) {
+                    delete memos[cmd.targetDate];
+                    localStorage.setItem('ai_calendar_memos', JSON.stringify(memos));
+                    selectDate(cmd.targetDate);
+                    document.getElementById('voice-log').textContent = `🗑️ ${cmd.targetDate} の予定を削除しました。`;
+                } else {
+                    document.getElementById('voice-log').textContent = `⚠️ 削除する予定はありませんでした。`;
+                }
+            } else if (cmd.action === "move") {
+                if (cmd.destDate && memos[cmd.targetDate]) {
+                    const contentToMove = memos[cmd.targetDate];
+                    delete memos[cmd.targetDate];
+                    memos[cmd.destDate] = (memos[cmd.destDate] ? memos[cmd.destDate] + "\n" : "") + contentToMove;
+                    localStorage.setItem('ai_calendar_memos', JSON.stringify(memos));
+                    selectDate(cmd.destDate);
+                    document.getElementById('voice-log').textContent = `🔄 ${cmd.targetDate} から ${cmd.destDate} へ移動しました！`;
+                } else {
+                    document.getElementById('voice-log').textContent = `⚠️ 移動元の予定が見つからないか、移動先が不明です。`;
+                }
+            }
+            renderCalendar();
+        }
+
+        async function askAI() {
+            if (!API_KEY) return alert('APIキーを設定してください');
+            const text = document.getElementById('memo-input').value;
+            if (!text) return alert('AIに渡すメモを入力してください');
+            const resultDiv = document.getElementById('ai-result');
+            resultDiv.style.display = 'block';
+            resultDiv.textContent = 'AIが思考中...';
+
+            try {
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [{ text: `以下のカレンダーメモの内容をもとに、鋭い視点で壁打ち相手になってください。\n\n日付: ${selectedDateStr}\n内容: ${text}` }]
+                        }]
+                    })
+                });
+                const data = await response.json();
+                resultDiv.textContent = data.candidates[0].content.parts[0].text;
+            } catch (e) {
+                resultDiv.textContent = 'エラー: ' + e.message;
+            }
+        }
+
+        selectDate(todayStr);
+        renderCalendar();
+    </script>
+</body>
+</html>
